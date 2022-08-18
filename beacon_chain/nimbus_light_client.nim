@@ -6,12 +6,13 @@
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
 import
-  std/os,
+  std/json, std/os,
   chronicles, chronicles/chronos_tools, chronos,
   eth/keys,
   ./eth1/eth1_monitor,
   ./gossip_processing/optimistic_processor,
   ./networking/topic_params,
+  json_serialization,
   ./spec/beaconstate,
   ./spec/datatypes/[phase0, altair, bellatrix],
   "."/[light_client, nimbus_binary_common, version]
@@ -20,9 +21,26 @@ from ./consensus_object_pools/consensus_manager import runForkchoiceUpdated
 from ./gossip_processing/block_processor import newExecutionPayload
 from ./gossip_processing/eth2_processor import toValidationResult
 
-programMain:
-  var config = makeBannerAndConfig(
-    "Nimbus light client " & fullVersionStr, LightClientConf)
+
+type  OnHeaderCallback* = proc (s: cstring) {.cdecl.}
+
+var optimisticHeaderCallback : OnHeaderCallback = nil
+var finalizedHeaderCallback : OnHeaderCallback = nil
+proc setOptimisticHeaderCallback*(cb: OnHeaderCallback) {.exportc.} =
+  optimisticHeaderCallback = cb
+  echo "optimistic header callback set"
+
+proc setFinalizedHeaderCallback*(cb: OnHeaderCallback) {.exportc.} =
+  finalizedHeaderCallback = cb
+  echo "finalized header callback set"
+
+proc testEcho*() {.exportc.} =
+  echo "testEcho inside nimbus-light-client"
+
+proc startLightClient*(cfg: var LightClientConf) =
+  echo "startLightClient inside nimbus-light-client"
+  var config: LightClientConf = cfg
+
   setupLogging(config.logLevel, config.logStdout, config.logFile)
 
   notice "Launching light client",
@@ -127,12 +145,26 @@ programMain:
       lightClient: LightClient, finalizedHeader: BeaconBlockHeader) =
     info "New LC finalized header",
       finalized_header = shortLog(finalizedHeader)
+    if finalizedHeaderCallback != nil:
+        echo "### Invoking finalizedHeaderCallback"
+        {.gcsafe.}:
+          try:
+            finalizedHeaderCallback(Json.encode(finalizedHeader))
+          except Exception:
+            echo "finalizedHeaderCallback exception"
 
   proc onOptimisticHeader(
       lightClient: LightClient, optimisticHeader: BeaconBlockHeader) =
     info "New LC optimistic header",
       optimistic_header = shortLog(optimisticHeader)
     optimisticProcessor.setOptimisticHeader(optimisticHeader)
+    if optimisticHeaderCallback != nil:
+      echo "### Invoking optimisticHeaderCallback"
+      {.gcsafe.}:
+        try:
+          optimisticHeaderCallback(Json.encode(optimisticHeader))
+        except Exception:
+          echo "optimisticHeaderCallback exception"
 
   lightClient.onFinalizedHeader = onFinalizedHeader
   lightClient.onOptimisticHeader = onOptimisticHeader
@@ -237,3 +269,60 @@ programMain:
   asyncSpawn runOnSecondLoop()
   while true:
     poll()
+
+proc createConfig(clientId: string, configFilePath: string): LightClientConf =
+  let
+    version = clientId & "\p" & copyrights & "\p\p" &
+      "eth2 specification v" & SPEC_VERSION & "\p\p" &
+      nimBanner
+
+  # TODO for some reason, copyrights are printed when doing `--help`
+  {.push warning[ProveInit]: off.}
+  let config = try:
+    LightClientConf.load(
+      version = version, # but a short version string makes more sense...
+      copyrightBanner = clientId,
+      secondarySources = proc (config: LightClientConf, sources: auto) =
+        sources.addConfigFile(Toml, InputFile(configFilePath))
+    )
+  except CatchableError as err:
+    # We need to log to stderr here, because logging hasn't been configured yet
+    stderr.write "Failure while loading the configuration:\n"
+    stderr.write err.msg
+    stderr.write "\n"
+
+    if err[] of ConfigurationError and
+       err.parent != nil and
+       err.parent[] of TomlFieldReadingError:
+      let fieldName = ((ref TomlFieldReadingError)(err.parent)).field
+      if fieldName in ["web3-url", "bootstrap-node",
+                       "direct-peer", "validator-monitor-pubkey"]:
+        stderr.write "Since the '" & fieldName & "' option is allowed to " &
+                     "have more than one value, please make sure to supply " &
+                     "a properly formatted TOML array\n"
+    quit 1
+  {.pop.}
+  config
+
+
+proc NimMain() {.importc.}
+proc startLc*(configFilePath: cstring) {.exportc.} =
+  echo "startLc inside nimbus-light-client 0"
+  NimMain()
+  echo "startLc inside nimbus-light-client 00"
+
+  let configFileStr = $configFilePath
+  echo "startLc inside nimbus-light-client 1"
+
+  var config = createConfig("Nimbus light client " & fullVersionStr, configFileStr)
+  echo "startLc inside nimbus-light-client 2"
+  echo "configFileStr, ", configFileStr
+  echo "startLc inside nimbus-light-client 3"
+  startLightClient(config)
+
+# programMain:
+#   var config = makeBannerAndConfig(
+#     "Nimbus light client " & fullVersionStr, LightClientConf)
+
+#   startLightClient(config)
+

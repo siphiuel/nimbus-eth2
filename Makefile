@@ -693,6 +693,11 @@ libnfuzz.a: | build deps
 		echo -e $(BUILD_END_MSG) "build/$@" && \
 		[[ -e "$@" ]] && mv "$@" build/ || true # workaround for https://github.com/nim-lang/Nim/issues/12745
 
+liblightclient-objs: | build deps
+	+ echo -e $(BUILD_MSG) "build/$@" && \
+		$(ENV_SCRIPT) nim c --noLinking:on --header:lightclient.h --noMain:on --nimcache:nimcache/liblightclient -o:build/$@ $(NIM_PARAMS) beacon_chain/nimbus_light_client.nim && \
+		echo -e $(BUILD_END_MSG) "build/$@"
+
 book:
 	"$(MAKE)" -C docs book
 
